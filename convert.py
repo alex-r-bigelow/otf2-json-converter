@@ -16,10 +16,17 @@ args = parser.parse_args()
 otfPrint = subprocess.Popen(['otf2-print', args.input], stdout=subprocess.PIPE)
 outfile = open(args.output, 'w')
 
-firstLineParser = re.compile('^(\S+)\s+(\d+)\s+(\d+)\s+Region: "([^"]*)" <(\d+)>$')
-secondLineParser = re.compile('^\s+ADDITIONAL ATTRIBUTES: (.*)$')
-attrSplitter = re.compile('\), \(')
-attrParser = re.compile('\(?"([^"]*)" <\d+>; [^;]*; ([^\)]*)')
+eventLineParser = re.compile('^(\S+)\s+(\d+)\s+(\d+)\s+(.*)$')
+attrParsers = {
+  'ENTER': '(Region): "([^"]*)"',
+  'LEAVE': '(Region): "([^"]*)"',
+  'METRIC': 'Value: \("([^"]*)" <\d+>; [^;]*; ([^\)]*)',
+  'MPI_SEND': '([^:]*): ([^,]*)',
+  'MPI_RECV': '([^:]*): ([^,]*)'
+}
+addAttrLineParser = re.compile('^\s+ADDITIONAL ATTRIBUTES: (.*)$')
+addAttrSplitter = re.compile('\), \(')
+addAttrParser = re.compile('\(?"([^"]*)" <\d+>; [^;]*; ([^\)]*)')
 
 outfile.write('{')
 
@@ -28,8 +35,7 @@ numEvents = 0
 
 def dumpEvent(currentEvent, numEvents):
     if currentEvent is not None:
-        outfile.write('\n');
-        outfile.write(json.dumps(currentEvent))
+        outfile.write('\n  ' + json.dumps(currentEvent));
         numEvents += 1
         if numEvents % 100 == 0:
             print('.', end=''),
@@ -39,23 +45,26 @@ def dumpEvent(currentEvent, numEvents):
 
 for line in otfPrint.stdout:
     line = line.decode()
-    firstLineMatch = firstLineParser.match(line)
-    secondLineMatch = secondLineParser.match(line)
-    if currentEvent is None and firstLineMatch is None:
+    eventLineMatch = eventLineParser.match(line)
+    addAttrLineMatch = addAttrLineParser.match(line)
+    if currentEvent is None and eventLineMatch is None:
         continue
 
-    if firstLineMatch:
+    if eventLineMatch:
         numEvents = dumpEvent(currentEvent, numEvents)
         currentEvent = {}
-        currentEvent['Event'] = firstLineMatch.group(1)
-        currentEvent['Location'] = int(firstLineMatch.group(2))
-        currentEvent['Timestamp'] = int(firstLineMatch.group(3))
-        currentEvent['Region'] = firstLineMatch.group(4) + ' ' + firstLineMatch.group(5)
+        currentEvent['Event'] = eventLineMatch.group(1)
+        currentEvent['Location'] = int(eventLineMatch.group(2))
+        currentEvent['Timestamp'] = int(eventLineMatch.group(3))
+        attrs = eventLineMatch.group(4)
+        assert currentEvent['Event'] in attrParsers
+        for attrMatch in re.finditer(attrParsers[currentEvent['Event']], attrs):
+            currentEvent[attrMatch.group(1)] = attrMatch.group(2)
     else:
-        assert currentEvent is not None and secondLineMatch is not None
-        attrList = attrSplitter.split(secondLineMatch.group(1))
+        assert currentEvent is not None and addAttrLineMatch is not None
+        attrList = addAttrSplitter.split(addAttrLineMatch.group(1))
         for attrStr in attrList:
-            attr = attrParser.match(attrStr)
+            attr = addAttrParser.match(attrStr)
             assert attr is not None
             currentEvent[attr.group(1)] = attr.group(2)
 dumpEvent(currentEvent, numEvents)
