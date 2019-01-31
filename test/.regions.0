@@ -1,8 +1,0 @@
-0	run_helper
-1	load_components_action
-2	task_object::apply
-3	fibonacci_action
-4	shutdown_all_action
-5	primary_namespace_colocate_action
-6	broadcast_call_shutdown_functions_action
-7	call_shutdown_functions_action
