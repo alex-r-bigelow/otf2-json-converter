@@ -69,14 +69,6 @@ for line in args.input:
     else:
         assert False
 
-# Output the regions hash
-sys.stdout.write(',\n  "regions": {')
-for index, (key, value) in enumerate(regions.items()):
-    if index > 0:
-        sys.stdout.write(',')
-    sys.stdout.write('\n    "' + key + '": ' + json.dumps(value))
-sys.stdout.write('\n  }')
-
 # Parse the OTF2 trace, output non-ENTER/LEAVE events directly as we encounter them so they don't stick around in memory
 otfPrint = subprocess.Popen(['otf2-print', args.otf2], stdout=subprocess.PIPE)
 
@@ -105,11 +97,22 @@ def dumpEvent(currentEvent, numEvents):
             eprint('.', end=''),
         if numEvents % 100000 == 0:
             eprint('processed %i events' % numEvents)
+
+        regionName = currentEvent['Region']
+        if not regionName in regions:
+            regions[regionName] = {}
+            # TODO: figure out parent region based on GUIDs
+            regions['name'] = regionName
+        if not 'eventCount' in regions[regionName]:
+            regions[regionName]['eventCount'] = 0
+        regions[regionName]['eventCount'] += 1
+
         if args.events is not None:
             # Dump the event to the file
             if numEvents > 1:
                 sys.stdout.write(',')
             sys.stdout.write('\n    ' + json.dumps(currentEvent))
+
         if currentEvent['Event'] == 'ENTER' or currentEvent['Event'] == 'LEAVE':
             # Add (and sort) the enter / leave event into its location list
             if not currentEvent['Location'] in locations:
@@ -125,7 +128,7 @@ for line in otfPrint.stdout:
         # This is a blank / header line
         continue
 
-    if eventLineMatch:
+    if eventLineMatch is not None:
         # This is the beginning of a new event; dump the previous one
         numEvents = dumpEvent(currentEvent, numEvents)
         currentEvent = {}
@@ -190,8 +193,17 @@ for eventList in locations.values():
             lastEvent = None
     # Make sure there are no trailing ENTER events
     assert lastEvent is None
-    # Finish the ranges dict
-    sys.stdout.write('\n  }')
-    
-    # Finish the JSON output
-    sys.stdout.write('\n}')
+# Finish the ranges dict
+sys.stdout.write('\n  }')
+
+
+# Output the regions hash
+sys.stdout.write(',\n  "regions": {')
+for index, (key, value) in enumerate(regions.items()):
+    if index > 0:
+        sys.stdout.write(',')
+    sys.stdout.write('\n    "' + key + '": ' + json.dumps(value))
+sys.stdout.write('\n  }')
+
+# Finish the JSON output
+sys.stdout.write('\n}')
