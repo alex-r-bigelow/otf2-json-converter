@@ -24,25 +24,37 @@ sys.stdout.write('{')
 
 # Parse the tree and performance data (waits for stdout to finish before attempting to parse the OTF2 trace)
 treeModeParser = re.compile(r'Tree information for function:')
-phylanxLinedEventParser = re.compile(r'(/phylanx/[^\$]*)\$([^\$]*)\$([^\$]*)\$([^\$]*)\$([^\$]*)')
+codeLinkedEventParser = re.compile(r'(/phylanx/[^\$]*)\$([^\$]*)\$([^\$]*)\$([^\$]*)\$([^\$]*)')
 
-def dumpTree(node, spaces):
-    result = {}
-    result['name'] = node.name
-    result['children'] = []
-    sys.stdout.write('\n' + spaces + '"name": "' + node.name + '",')
+regions = {}
+def dumpTree(node, spaces, parent=None):
+    # Create the hashed region object
+    regionName = node.name.strip()
+    assert regionName not in regions
+    regions[regionName] = {}
+    if parent is not None:
+        regions[regionName]['parent'] = parent
+    codeLinkedEvent = codeLinkedEventParser.match(regionName)
+    if codeLinkedEvent is not None:
+        regions[regionName]['name'] = codeLinkedEvent[1]
+        regions[regionName]['token1'] = codeLinkedEvent[2]
+        regions[regionName]['token2'] = codeLinkedEvent[3]
+        regions[regionName]['token3'] = codeLinkedEvent[4]
+        regions[regionName]['token4'] = codeLinkedEvent[5]
+
+    # Create the tree hierarchy
+    sys.stdout.write('\n' + spaces + '"name": "' + regionName + '",')
     if len(node.descendants) > 0:
         sys.stdout.write('\n' + spaces + '"children": [')
         for index, child in enumerate(node.descendants):
             if index > 0:
                 sys.stdout.write(',')
             sys.stdout.write('\n' + spaces + '  {')
-            result['children'].append(dumpTree(child, spaces + '    '))
+            dumpTree(child, spaces + '    ', parent=regionName)
             sys.stdout.write('\n' + spaces + '  }')
         sys.stdout.write('\n' + spaces + ']')
     else:
         sys.stdout.write('\n' + spaces + '"children": []')
-    return result
 
 mode = None
 for line in args.input:
@@ -51,11 +63,19 @@ for line in args.input:
             mode = 'tree'
     elif mode == 'tree':
         sys.stdout.write('\n  "tree": {')
-        tree = dumpTree(newick.loads(line)[0], '    ')
+        dumpTree(newick.loads(line)[0], '    ')
         sys.stdout.write('\n  }')
         mode = None
     else:
         assert False
+
+# Output the regions hash
+sys.stdout.write(',\n  "regions": {')
+for index, (key, value) in enumerate(regions.items()):
+    if index > 0:
+        sys.stdout.write(',')
+    sys.stdout.write('\n    "' + key + '": ' + json.dumps(value))
+sys.stdout.write('\n  }')
 
 # Parse the OTF2 trace, output non-ENTER/LEAVE events directly as we encounter them so they don't stick around in memory
 otfPrint = subprocess.Popen(['otf2-print', args.otf2], stdout=subprocess.PIPE)
