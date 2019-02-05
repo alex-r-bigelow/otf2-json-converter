@@ -20,6 +20,8 @@ parser.add_argument('-r', '--omit_ranges', dest='ranges', action='store_false',
                     help='Suppress trace ranges (ENTER and LEAVE are combined)')
 parser.add_argument('-l', '--omit_links', dest='region_links', action='store_false',
                     help='Suppress the region links (separate from the implicit links in regions)')
+parser.add_argument('-s', '--debug_sources', dest='debug_sources', action='store_true',
+                    help='Include debugging information for the source of each region')
 
 args = parser.parse_args()
 
@@ -53,10 +55,14 @@ def addRegionChild(parent, child):
         regions[child]['parent'] = parent
     regions[parent]['children'].add(child)
 
-def dumpRegion(regionName, parent=None):
+def dumpRegion(regionName, source, parent=None):
     if regionName in regions:
+        if args.debug_sources is True:
+            regions[regionName]['sources'].add(source)
         return
     regions[regionName] = { 'children': set() }
+    if args.debug_sources is True:
+        regions[regionName]['sources'] = set([source])
     if parent is not None:
         addRegionChild(parent, regionName)
         regions[regionName]['parent'] = parent
@@ -76,7 +82,7 @@ def dumpTree(node, spaces, parent=None):
     # Create the hashed region object
     regionName = node.name.strip()
     assert regionName not in regions
-    dumpRegion(regionName, parent)
+    dumpRegion(regionName, 'tree', parent)
 
     # Create the tree hierarchy
     conditionalPrint(args.tree, '\n' + spaces + '"name": "' + regionName + '",')
@@ -118,6 +124,10 @@ for line in args.input:
     elif mode == 'dot':
         dotLine = dotLineParser.match(line)
         if dotLine is not None:
+            assert dotLine[1] in regions
+            dumpRegion(dotLine[1], 'dot graph', parent=None)
+            assert dotLine[2] in regions
+            dumpRegion(dotLine[2], 'dot graph', parent=None)
             addRegionChild(dotLine[1], dotLine[2])
         else:
             mode = None
@@ -125,7 +135,8 @@ for line in args.input:
         perfLine = perfLineParser.match(line)
         if perfLine is not None:
             regionName = perfLine[1]
-            dumpRegion(regionName, parent=None)     # TODO: assert regionName in regions fails sometimes... ask why
+            # TODO: assert regionName in regions
+            dumpRegion(regionName, 'perf csv', parent=None)
             regions[regionName]['display_name'] = perfLine[2]
             regions[regionName]['count'] = perfLine[3]
             regions[regionName]['time'] = perfLine[4]
@@ -166,7 +177,7 @@ def dumpEvent(currentEvent, numEvents):
             log('processed %i events' % numEvents)
 
         regionName = currentEvent['Region']
-        dumpRegion(regionName, parent=None)     # TODO: figure out parent region based on GUIDs
+        dumpRegion(regionName, 'otf2 event', parent=None)     # TODO: figure out parent region based on GUIDs
         if 'eventCount' not in regions[regionName]:
             regions[regionName]['eventCount'] = 0
         regions[regionName]['eventCount'] += 1
@@ -266,6 +277,8 @@ writeRootComma(True)
 sys.stdout.write('\n  "regions": {')
 for rIndex, (regionName, region) in enumerate(regions.items()):
     region['children'] = list(region['children'])
+    if args.debug_sources:
+        region['sources'] = list(region['sources'])
     if rIndex > 0:
         sys.stdout.write(',')
     sys.stdout.write('\n    "' + regionName + '": {')
