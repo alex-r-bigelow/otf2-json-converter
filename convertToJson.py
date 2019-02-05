@@ -18,8 +18,8 @@ parser.add_argument('-t', '--tree', dest='tree', action='store_true',
                     help='Include the tree (separate from the implicit one in regions)')
 parser.add_argument('-r', '--omit_ranges', dest='ranges', action='store_false',
                     help='Suppress trace ranges (ENTER and LEAVE are combined)')
-parser.add_argument('-l', '--omit_links', dest='graph', action='store_false',
-                    help='Suppress the graph links (separate from the implicit links in regions)')
+parser.add_argument('-l', '--omit_links', dest='region_links', action='store_false',
+                    help='Suppress the region links (separate from the implicit links in regions)')
 
 args = parser.parse_args()
 
@@ -27,8 +27,9 @@ args = parser.parse_args()
 sys.stdout.write('{')
 
 # Helper tools for outputting / logging data
-def log(*args, **kwargs):
-    print(*args, file=sys.stderr, **kwargs)
+def log(value, end='\n'):
+    sys.stderr.write(value + end)
+    sys.stderr.flush()
 
 firstRootElement = True
 def writeRootComma(condition):
@@ -64,8 +65,8 @@ def dumpRegion(regionName, parent=None):
         regions[regionName]['name'] = codeLinkedEvent[1]
         regions[regionName]['token1'] = codeLinkedEvent[2]
         regions[regionName]['token2'] = codeLinkedEvent[3]
-        regions[regionName]['token3'] = codeLinkedEvent[4]
-        regions[regionName]['token4'] = codeLinkedEvent[5]
+        regions[regionName]['line'] = codeLinkedEvent[4]
+        regions[regionName]['char'] = codeLinkedEvent[5]
 
 # Tools for handling the tree
 treeModeParser = re.compile(r'Tree information for function:')
@@ -94,6 +95,10 @@ def dumpTree(node, spaces, parent=None):
 dotModeParser = re.compile(r'graph "[^"]*" {')
 dotLineParser = re.compile(r'"([^"]*)" -- "([^"]*)";')
 
+# Tools for handling the performance csv
+perfModeParser = re.compile(r'primitive_instance,display_name,count,time,eval_direct')
+perfLineParser = re.compile(r'"([^"]*)","([^"]*)",(\d+),(\d+),(-?1)')
+
 # Parse stdout first (waits for it to finish before attempting to parse the OTF2 trace)
 mode = None
 for line in args.input:
@@ -104,6 +109,8 @@ for line in args.input:
             conditionalPrint(args.tree, '\n  "tree": {')
         elif dotModeParser.match(line):
             mode = 'dot'
+        elif perfModeParser.match(line):
+            mode = 'perf'
     elif mode == 'tree':
         dumpTree(newick.loads(line)[0], '    ')
         conditionalPrint(args.tree, '\n  }')
@@ -112,6 +119,17 @@ for line in args.input:
         dotLine = dotLineParser.match(line)
         if dotLine is not None:
             addRegionChild(dotLine[1], dotLine[2])
+        else:
+            mode = None
+    elif mode == 'perf':
+        perfLine = perfLineParser.match(line)
+        if perfLine is not None:
+            regionName = perfLine[1]
+            dumpRegion(regionName, parent=None)     # TODO: assert regionName in regions fails sometimes... ask why
+            regions[regionName]['display_name'] = perfLine[2]
+            regions[regionName]['count'] = perfLine[3]
+            regions[regionName]['time'] = perfLine[4]
+            regions[regionName]['eval_direct'] = perfLine[5]
         else:
             mode = None
     else:
@@ -194,6 +212,7 @@ for line in otfPrint.stdout:
 # The last event will never have had a chance to be dumped:
 dumpEvent(currentEvent, numEvents)
 conditionalPrint(args.events, '\n  }')
+log('finished processing %i events' % numEvents)
 
 # Combine the sorted enter / leave events into ranges
 if args.ranges is True:
@@ -240,6 +259,7 @@ if args.ranges is True:
         assert lastEvent is None
     # Finish the ranges dict
     sys.stdout.write('\n  }')
+    log('finished processing %i ranges' % numRanges)
 
 # Output the regions
 writeRootComma(True)
@@ -257,9 +277,9 @@ for rIndex, (regionName, region) in enumerate(regions.items()):
 sys.stdout.write('\n  }')
 
 # Output the graph links
-if args.graph:
-    writeRootComma(args.graph)
-    sys.stdout.write('\n  "graph": {')
+if args.region_links:
+    writeRootComma(True)
+    sys.stdout.write('\n  "region links": {')
     for pIndex, (parent, value) in enumerate(regions.items()):
         for cIndex, child in enumerate(value['children']):
             if pIndex > 0 or cIndex > 0:
