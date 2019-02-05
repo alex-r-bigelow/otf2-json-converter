@@ -7,32 +7,57 @@ import json
 import heapq
 import newick
 
-parser = argparse.ArgumentParser(description='Collect stdout from a phylanx')
+parser = argparse.ArgumentParser(description='Collect stdout and/or OTF2 trace data from a phylanx run')
 parser.add_argument('-i', '--input', dest='input', default=sys.stdin, type=argparse.FileType('r'), nargs='?',
-                    help='stdout from phylanx as a file; alternatively, you can omit this argument and pipe the phylanx output directly into this script')
-parser.add_argument('-o', '--otf2', dest='otf2', default='test_data/OTF2_archive/APEX.otf2',
+                    help='stdout from phylanx run as a file; alternatively, you can omit this argument and pipe the phylanx output directly into this script')
+parser.add_argument('-o', '--otf2', dest='otf2',
                     help='The input otf2 trace file (e.g. test_data/OTF2_archive/APEX.otf2)')
-parser.add_argument('-e', '--events', dest='events', action="store_true",
+parser.add_argument('-e', '--events', dest='events', action='store_true',
                     help='Include all discrete trace events (e.g. ENTER, LEAVE, MPI_SEND, etc. are separate)')
+parser.add_argument('-t', '--tree', dest='tree', action='store_true',
+                    help='Include the tree (separate from the implicit one in regions)')
+parser.add_argument('-r', '--omit_ranges', dest='ranges', action='store_false',
+                    help='Suppress trace ranges (ENTER and LEAVE are combined)')
+parser.add_argument('-l', '--omit_links', dest='graph', action='store_false',
+                    help='Suppress the graph links (separate from the implicit links in regions)')
 
 args = parser.parse_args()
-def eprint(*args, **kwargs):
-    print(*args, file=sys.stderr, **kwargs)
 
 # Output the opening JSON character
 sys.stdout.write('{')
 
-# Parse the tree and performance data (waits for stdout to finish before attempting to parse the OTF2 trace)
-treeModeParser = re.compile(r'Tree information for function:')
+# Helper tools for outputting / logging data
+def log(*args, **kwargs):
+    print(*args, file=sys.stderr, **kwargs)
+
+firstRootElement = True
+def writeRootComma(condition):
+    global firstRootElement
+    if condition is True:
+        if firstRootElement is False:
+            sys.stdout.write(',')
+        firstRootElement = False
+def conditionalPrint(condition, text):
+    if condition is True:
+        sys.stdout.write(text)
+
+
+# Tools for handling region names
 codeLinkedEventParser = re.compile(r'(/phylanx/[^\$]*)\$([^\$]*)\$([^\$]*)\$([^\$]*)\$([^\$]*)')
 
-regions = {}
-def dumpTree(node, spaces, parent=None):
-    # Create the hashed region object
-    regionName = node.name.strip()
-    assert regionName not in regions
-    regions[regionName] = {}
+def addRegionChild(parent, child):
+    if 'parent' in regions[child]:
+        assert regions[child]['parent'] == parent
+    else:
+        regions[child]['parent'] = parent
+    regions[parent]['children'].add(child)
+
+def dumpRegion(regionName, parent=None):
+    if regionName in regions:
+        return
+    regions[regionName] = { 'children': set() }
     if parent is not None:
+        addRegionChild(parent, regionName)
         regions[regionName]['parent'] = parent
     codeLinkedEvent = codeLinkedEventParser.match(regionName)
     if codeLinkedEvent is not None:
@@ -42,31 +67,55 @@ def dumpTree(node, spaces, parent=None):
         regions[regionName]['token3'] = codeLinkedEvent[4]
         regions[regionName]['token4'] = codeLinkedEvent[5]
 
-    # Create the tree hierarchy
-    sys.stdout.write('\n' + spaces + '"name": "' + regionName + '",')
-    if len(node.descendants) > 0:
-        sys.stdout.write('\n' + spaces + '"children": [')
-        for index, child in enumerate(node.descendants):
-            if index > 0:
-                sys.stdout.write(',')
-            sys.stdout.write('\n' + spaces + '  {')
-            dumpTree(child, spaces + '    ', parent=regionName)
-            sys.stdout.write('\n' + spaces + '  }')
-        sys.stdout.write('\n' + spaces + ']')
-    else:
-        sys.stdout.write('\n' + spaces + '"children": []')
+# Tools for handling the tree
+treeModeParser = re.compile(r'Tree information for function:')
 
+regions = {}
+def dumpTree(node, spaces, parent=None):
+    # Create the hashed region object
+    regionName = node.name.strip()
+    assert regionName not in regions
+    dumpRegion(regionName, parent)
+
+    # Create the tree hierarchy
+    conditionalPrint(args.tree, '\n' + spaces + '"name": "' + regionName + '",')
+    if len(node.descendants) > 0:
+        conditionalPrint(args.tree, '\n' + spaces + '"children": [')
+        for index, child in enumerate(node.descendants):
+            conditionalPrint(args.tree and index > 0, ',')
+            conditionalPrint(args.tree, '\n' + spaces + '  {')
+            dumpTree(child, spaces + '    ', parent=regionName)
+            conditionalPrint(args.tree, '\n' + spaces + '  }')
+        conditionalPrint(args.tree, '\n' + spaces + ']')
+    else:
+        conditionalPrint(args.tree, '\n' + spaces + '"children": []')
+
+# Tools for handling the DOT graph
+dotModeParser = re.compile(r'graph "[^"]*" {')
+dotLineParser = re.compile(r'"([^"]*)" -- "([^"]*)";')
+
+# Parse stdout first (waits for it to finish before attempting to parse the OTF2 trace)
 mode = None
 for line in args.input:
     if mode is None:
         if treeModeParser.match(line):
             mode = 'tree'
+            writeRootComma(args.tree)
+            conditionalPrint(args.tree, '\n  "tree": {')
+        elif dotModeParser.match(line):
+            mode = 'dot'
     elif mode == 'tree':
-        sys.stdout.write('\n  "tree": {')
         dumpTree(newick.loads(line)[0], '    ')
-        sys.stdout.write('\n  }')
+        conditionalPrint(args.tree, '\n  }')
         mode = None
+    elif mode == 'dot':
+        dotLine = dotLineParser.match(line)
+        if dotLine is not None:
+            addRegionChild(dotLine[1], dotLine[2])
+        else:
+            mode = None
     else:
+        # Should never reach this point
         assert False
 
 # Parse the OTF2 trace, output non-ENTER/LEAVE events directly as we encounter them so they don't stick around in memory
@@ -84,8 +133,8 @@ addAttrLineParser = re.compile(r'^\s+ADDITIONAL ATTRIBUTES: (.*)$')
 addAttrSplitter = re.compile(r'\), \(')
 addAttrParser = re.compile(r'\(?"([^"]*)" <\d+>; [^;]*; ([^\)]*)')
 
-if args.events is True:
-    sys.stdout.write(',\n  "events": {')
+writeRootComma(args.events)
+conditionalPrint(args.events, '\n  "events": {')
 currentEvent = None
 numEvents = 0
 locations = {}
@@ -94,30 +143,25 @@ def dumpEvent(currentEvent, numEvents):
     if currentEvent is not None:
         numEvents += 1
         if numEvents % 10000 == 0:
-            eprint('.', end=''),
+            log('.', end=''),
         if numEvents % 100000 == 0:
-            eprint('processed %i events' % numEvents)
+            log('processed %i events' % numEvents)
 
         regionName = currentEvent['Region']
-        if not regionName in regions:
-            regions[regionName] = {}
-            # TODO: figure out parent region based on GUIDs
-            regions['name'] = regionName
-        if not 'eventCount' in regions[regionName]:
+        dumpRegion(regionName, parent=None)     # TODO: figure out parent region based on GUIDs
+        if 'eventCount' not in regions[regionName]:
             regions[regionName]['eventCount'] = 0
         regions[regionName]['eventCount'] += 1
 
-        if args.events is not None:
-            # Dump the event to the file
-            if numEvents > 1:
-                sys.stdout.write(',')
-            sys.stdout.write('\n    ' + json.dumps(currentEvent))
-
-        if currentEvent['Event'] == 'ENTER' or currentEvent['Event'] == 'LEAVE':
+        if args.ranges and (currentEvent['Event'] == 'ENTER' or currentEvent['Event'] == 'LEAVE'):
             # Add (and sort) the enter / leave event into its location list
             if not currentEvent['Location'] in locations:
                 locations[currentEvent['Location']] = []
             heapq.heappush(locations[currentEvent['Location']], (currentEvent['Timestamp'], currentEvent))
+        
+        # Dump the event to the file
+        conditionalPrint(args.events and numEvents > 1, ',')
+        conditionalPrint(args.events, '\n    ' + json.dumps(currentEvent))
     return numEvents
 
 for line in otfPrint.stdout:
@@ -149,61 +193,79 @@ for line in otfPrint.stdout:
             currentEvent[attr.group(1)] = attr.group(2)
 # The last event will never have had a chance to be dumped:
 dumpEvent(currentEvent, numEvents)
-if args.events is True:
-    sys.stdout.write('\n  }')
+conditionalPrint(args.events, '\n  }')
 
 # Combine the sorted enter / leave events into ranges
-sys.stdout.write(',\n  "ranges":{')
-numRanges = 0
-for eventList in locations.values():
-    lastEvent = None
-    for timestamp, event in eventList:
-        if event['Event'] == 'ENTER':
-            # Start a range (don't output anything)
-            assert lastEvent is None
-            lastEvent = event
-        elif event['Event'] == 'LEAVE':
-            # Finish a range
-            assert lastEvent is not None
-            currentRange = {}
-            for attr, value in event.items():
-                # For now, we assume Event, Timestamp, and Region are the only things
-                # that can change between an ENTER / LEAVE pair
-                if attr != 'Event' and attr != 'Timestamp' and attr != 'Region':
-                    assert event[attr] == lastEvent[attr]
-                    currentRange[attr] = value
-            currentRange['enter'] = {
-                'Timestamp': lastEvent['Timestamp'],
-                'Region': lastEvent['Region']
-            }
-            currentRange['leave'] = {
-                'Timestamp': event['Timestamp'],
-                'Region': event['Region']
-            }
+if args.ranges is True:
+    writeRootComma(args.ranges)
+    sys.stdout.write('\n  "ranges":{')
+    numRanges = 0
+    for eventList in locations.values():
+        lastEvent = None
+        for timestamp, event in eventList:
+            if event['Event'] == 'ENTER':
+                # Start a range (don't output anything)
+                assert lastEvent is None
+                lastEvent = event
+            elif event['Event'] == 'LEAVE':
+                # Finish a range
+                assert lastEvent is not None
+                currentRange = {}
+                for attr, value in event.items():
+                    # For now, we assume Event, Timestamp, and Region are the only things
+                    # that can change between an ENTER / LEAVE pair
+                    if attr != 'Event' and attr != 'Timestamp' and attr != 'Region':
+                        assert event[attr] == lastEvent[attr]
+                        currentRange[attr] = value
+                currentRange['enter'] = {
+                    'Timestamp': lastEvent['Timestamp'],
+                    'Region': lastEvent['Region']
+                }
+                currentRange['leave'] = {
+                    'Timestamp': event['Timestamp'],
+                    'Region': event['Region']
+                }
 
-            # Output the finished range
-            numRanges += 1
-            if numRanges % 10000 == 0:
-                eprint('.', end=''),
-            if numRanges % 100000 == 0:
-                eprint('processed %i ranges' % numRanges)
-            if numRanges > 0:
-                sys.stdout.write(',')
-            sys.stdout.write('\n    ' + json.dumps(currentRange))
-            lastEvent = None
-    # Make sure there are no trailing ENTER events
-    assert lastEvent is None
-# Finish the ranges dict
-sys.stdout.write('\n  }')
+                # Output the finished range
+                numRanges += 1
+                if numRanges % 10000 == 0:
+                    log('.', end=''),
+                if numRanges % 100000 == 0:
+                    log('processed %i ranges' % numRanges)
+                if numRanges > 0:
+                    sys.stdout.write(',')
+                sys.stdout.write('\n    ' + json.dumps(currentRange))
+                lastEvent = None
+        # Make sure there are no trailing ENTER events
+        assert lastEvent is None
+    # Finish the ranges dict
+    sys.stdout.write('\n  }')
 
-
-# Output the regions hash
-sys.stdout.write(',\n  "regions": {')
-for index, (key, value) in enumerate(regions.items()):
-    if index > 0:
+# Output the regions
+writeRootComma(True)
+sys.stdout.write('\n  "regions": {')
+for rIndex, (regionName, region) in enumerate(regions.items()):
+    region['children'] = list(region['children'])
+    if rIndex > 0:
         sys.stdout.write(',')
-    sys.stdout.write('\n    "' + key + '": ' + json.dumps(value))
+    sys.stdout.write('\n    "' + regionName + '": {')
+    for aIndex, (attrName, attr) in enumerate(region.items()):
+        if aIndex > 0:
+            sys.stdout.write(',')
+        sys.stdout.write('\n      "' + attrName + '": ' + json.dumps(attr))
+    sys.stdout.write('\n    }')
 sys.stdout.write('\n  }')
+
+# Output the graph links
+if args.graph:
+    writeRootComma(args.graph)
+    sys.stdout.write('\n  "graph": {')
+    for pIndex, (parent, value) in enumerate(regions.items()):
+        for cIndex, child in enumerate(value['children']):
+            if pIndex > 0 or cIndex > 0:
+                sys.stdout.write(',')
+            sys.stdout.write('\n    { "source": "' + parent + '", "target": "' + child + '" }')
+    sys.stdout.write('\n  }')
 
 # Finish the JSON output
 sys.stdout.write('\n}')
