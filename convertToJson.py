@@ -16,10 +16,12 @@ parser.add_argument('-e', '--events', dest='events', action='store_true',
                     help='Include all discrete trace events (e.g. ENTER, LEAVE, MPI_SEND, etc. are separate)')
 parser.add_argument('-t', '--tree', dest='tree', action='store_true',
                     help='Include the tree (separate from the implicit one in regions)')
+parser.add_argument('-g', '--guids', dest='guids', action='store_true',
+                    help='Include GUIDs')
 parser.add_argument('-r', '--omit_ranges', dest='ranges', action='store_false',
-                    help='Suppress trace ranges (ENTER and LEAVE are combined)')
+                    help='Suppress trace ranges from output (ENTER and LEAVE are combined)')
 parser.add_argument('-l', '--omit_links', dest='region_links', action='store_false',
-                    help='Suppress the region links (separate from the implicit links in regions)')
+                    help='Suppress the region links from output (separate from the implicit links in regions)')
 parser.add_argument('-s', '--debug_sources', dest='debug_sources', action='store_true',
                     help='Include debugging information for the source of each region')
 
@@ -46,13 +48,9 @@ def conditionalPrint(condition, text):
 
 
 # Tools for handling region names
-codeLinkedEventParser = re.compile(r'(/phylanx/[^\$]*)\$([^\$]*)\$([^\$]*)\$([^\$]*)\$([^\$]*)')
-
 def addRegionChild(parent, child):
-    if 'parent' in regions[child]:
-        assert regions[child]['parent'] == parent
-    else:
-        regions[child]['parent'] = parent
+    assert parent in regions and child in regions
+    regions[child]['parents'].add(parent)
     regions[parent]['children'].add(child)
 
 def dumpRegion(regionName, source, parent=None):
@@ -60,19 +58,16 @@ def dumpRegion(regionName, source, parent=None):
         if args.debug_sources is True:
             regions[regionName]['sources'].add(source)
         return
-    regions[regionName] = { 'children': set() }
+    regions[regionName] = { 'parents': set(), 'children': set() }
     if args.debug_sources is True:
         regions[regionName]['sources'] = set([source])
     if parent is not None:
         addRegionChild(parent, regionName)
-        regions[regionName]['parent'] = parent
-    codeLinkedEvent = codeLinkedEventParser.match(regionName)
-    if codeLinkedEvent is not None:
-        regions[regionName]['name'] = codeLinkedEvent[1]
-        regions[regionName]['token1'] = codeLinkedEvent[2]
-        regions[regionName]['token2'] = codeLinkedEvent[3]
-        regions[regionName]['line'] = codeLinkedEvent[4]
-        regions[regionName]['char'] = codeLinkedEvent[5]
+    regionChunks = regionName.split('$')
+    regions[regionName]['name'] = regionChunks[0]
+    if len(regionChunks) >= 3:
+        regions[regionName]['line'] = regionChunks[-2]
+        regions[regionName]['char'] = regionChunks[-1]
 
 # Tools for handling the tree
 treeModeParser = re.compile(r'Tree information for function:')
@@ -138,9 +133,9 @@ for line in args.input:
             # TODO: assert regionName in regions
             dumpRegion(regionName, 'perf csv', parent=None)
             regions[regionName]['display_name'] = perfLine[2]
-            regions[regionName]['count'] = perfLine[3]
-            regions[regionName]['time'] = perfLine[4]
-            regions[regionName]['eval_direct'] = perfLine[5]
+            regions[regionName]['count'] = int(perfLine[3])
+            regions[regionName]['time'] = int(perfLine[4])
+            regions[regionName]['eval_direct'] = int(perfLine[5])
         else:
             mode = None
     else:
@@ -167,8 +162,10 @@ conditionalPrint(args.events, '\n  "events": {')
 currentEvent = None
 numEvents = 0
 locations = {}
+guids = {}
 
-def dumpEvent(currentEvent, numEvents):
+def dumpEvent(currentEvent):
+    global numEvents
     if currentEvent is not None:
         numEvents += 1
         if numEvents % 10000 == 0:
@@ -176,12 +173,25 @@ def dumpEvent(currentEvent, numEvents):
         if numEvents % 100000 == 0:
             log('processed %i events' % numEvents)
 
-        regionName = currentEvent['Region']
-        dumpRegion(regionName, 'otf2 event', parent=None)     # TODO: figure out parent region based on GUIDs
+        # Identify the region (and add to its counter)
+        regionName = currentEvent['Region'].replace('::eval', '')
+        dumpRegion(regionName, 'otf2 event', parent=None)
         if 'eventCount' not in regions[regionName]:
             regions[regionName]['eventCount'] = 0
         regions[regionName]['eventCount'] += 1
 
+        # Add to GUID / Parent GUID relationships
+        if args.guids:
+            if 'guids' not in regions[regionName]:
+                regions[regionName]['guids'] = set()
+            regions[regionName]['guids'].add(currentEvent['GUID'])
+        if currentEvent['GUID'] in guids:
+            guids[currentEvent['GUID']]['regions'].add(regionName)
+            assert guids[currentEvent['GUID']]['parent'] == currentEvent['Parent GUID']
+        else:
+            guids[currentEvent['GUID']] = { 'regions': set([regionName]), 'parent': currentEvent['Parent GUID'] }
+
+        # Add enter / leave events to locations
         if args.ranges and (currentEvent['Event'] == 'ENTER' or currentEvent['Event'] == 'LEAVE'):
             # Add (and sort) the enter / leave event into its location list
             if not currentEvent['Location'] in locations:
@@ -191,7 +201,6 @@ def dumpEvent(currentEvent, numEvents):
         # Dump the event to the file
         conditionalPrint(args.events and numEvents > 1, ',')
         conditionalPrint(args.events, '\n    ' + json.dumps(currentEvent))
-    return numEvents
 
 for line in otfPrint.stdout:
     line = line.decode()
@@ -203,7 +212,7 @@ for line in otfPrint.stdout:
 
     if eventLineMatch is not None:
         # This is the beginning of a new event; dump the previous one
-        numEvents = dumpEvent(currentEvent, numEvents)
+        dumpEvent(currentEvent)
         currentEvent = {}
         currentEvent['Event'] = eventLineMatch.group(1)
         currentEvent['Location'] = int(eventLineMatch.group(2))
@@ -221,7 +230,7 @@ for line in otfPrint.stdout:
             assert attr is not None
             currentEvent[attr.group(1)] = attr.group(2)
 # The last event will never have had a chance to be dumped:
-dumpEvent(currentEvent, numEvents)
+dumpEvent(currentEvent)
 conditionalPrint(args.events, '\n  }')
 log('finished processing %i events' % numEvents)
 
@@ -272,13 +281,36 @@ if args.ranges is True:
     sys.stdout.write('\n  }')
     log('finished processing %i ranges' % numRanges)
 
+# Create any missing parent-child region relationships based on the GUIDs we've collected
+# (and, optionally, output the guids)
+writeRootComma(args.guids)
+conditionalPrint(args.guids, '\n  "guids": {')
+for gIndex, (guid, details) in enumerate(guids.items()):
+    if details['parent'] != '0':
+        assert details['parent'] in guids
+        # TODO: what's up with multiple regions?
+        for parentRegion in guids[details['parent']]['regions']:
+            for childRegion in details['regions']:
+                addRegionChild(parentRegion, childRegion)
+    details['regions'] = list(details['regions'])
+    conditionalPrint(args.guids and gIndex > 0, ',')
+    conditionalPrint(args.guids, '\n    "' + guid + '": ' + json.dumps(details))
+conditionalPrint(args.guids, '\n  }')
+
 # Output the regions
 writeRootComma(True)
 sys.stdout.write('\n  "regions": {')
 for rIndex, (regionName, region) in enumerate(regions.items()):
+    region['parents'] = list(region['parents'])
+    if len(region['parents']) == 0:
+        del region['parents']
     region['children'] = list(region['children'])
+    if len(region['children']) == 0:
+        del region['children']
     if args.debug_sources:
         region['sources'] = list(region['sources'])
+    if args.guids and 'guids' in region:
+        region['guids'] = list(region['guids'])
     if rIndex > 0:
         sys.stdout.write(',')
     sys.stdout.write('\n    "' + regionName + '": {')
