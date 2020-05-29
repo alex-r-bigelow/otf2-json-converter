@@ -297,6 +297,17 @@ for gIndex, (guid, details) in enumerate(guids.items()):
     conditionalPrint(args.guids, '\n    "' + guid + '": ' + json.dumps(details))
 conditionalPrint(args.guids, '\n  }')
 
+# Output the graph links
+if args.region_links:
+    writeRootComma(True)
+    sys.stdout.write('\n  "region links": {')
+    for pIndex, (parent, value) in enumerate(regions.items()):
+        for cIndex, child in enumerate(value['children']):
+            if pIndex > 0 or cIndex > 0:
+                sys.stdout.write(',')
+            sys.stdout.write('\n    { "source": "' + parent + '", "target": "' + child + '" }')
+    sys.stdout.write('\n  }')
+
 # Output the regions
 writeRootComma(True)
 sys.stdout.write('\n  "regions": {')
@@ -320,17 +331,6 @@ for rIndex, (regionName, region) in enumerate(regions.items()):
         sys.stdout.write('\n      "' + attrName + '": ' + json.dumps(attr))
     sys.stdout.write('\n    }')
 sys.stdout.write('\n  }')
-
-# Output the graph links
-if args.region_links:
-    writeRootComma(True)
-    sys.stdout.write('\n  "region links": {')
-    for pIndex, (parent, value) in enumerate(regions.items()):
-        for cIndex, child in enumerate(value['children']):
-            if pIndex > 0 or cIndex > 0:
-                sys.stdout.write(',')
-            sys.stdout.write('\n    { "source": "' + parent + '", "target": "' + child + '" }')
-    sys.stdout.write('\n  }')
 
 # Finish the JSON output
 sys.stdout.write('\n}')
